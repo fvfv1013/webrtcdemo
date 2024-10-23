@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
@@ -9,22 +10,17 @@ import (
 	"github.com/pion/webrtc/v4"
 	"io"
 	"log"
-	"log/slog"
 	"os"
-	"sync"
-	"sync/atomic"
 )
 
 func main() {
 	resvBuf := make(chan *webrtc.DataChannelMessage, 100)
 
-	CandidateConn := sync.Cond{L: &sync.Mutex{}}
 	// 1. PeerConnection
 	api := webrtc.NewAPI()
 	connection, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
-			{URLs: []string{"stun:stun.l.google.com:5349"}},
 		},
 	})
 	if err != nil {
@@ -43,33 +39,11 @@ func main() {
 	})
 
 	// 2. DataChannel
-	var CandidateChOpen atomic.Bool
 	DataChOpen := make(chan struct{}, 10)
 	var DataCh *webrtc.DataChannel
 	_ = DataCh
-	var CandidateCh *webrtc.DataChannel
 	connection.OnDataChannel(func(ch *webrtc.DataChannel) {
 		switch ch.Label() {
-		case "candidate":
-			CandidateCh = ch
-
-			ch.OnOpen(func() {
-				fmt.Println("candidateCH Open")
-				CandidateChOpen.Store(true)
-			})
-
-			ch.OnMessage(func(msg webrtc.DataChannelMessage) {
-				var candidate webrtc.ICECandidateInit
-				err := json.Unmarshal(msg.Data, &candidate)
-				if err != nil {
-					slog.Error("Error unmarshalling candidate:", err)
-					return
-				}
-				err = connection.AddICECandidate(candidate)
-				if err != nil {
-					slog.Error("Error adding ice candidate:", err)
-				}
-			})
 		case "data":
 			DataCh = ch
 
@@ -88,37 +62,19 @@ func main() {
 		if candidate == nil {
 			return
 		}
-
-		CandidateConn.L.Lock()
-		CandidateConn.Broadcast()
-		CandidateConn.L.Unlock()
-
-		if !CandidateChOpen.Load() {
-			return
-		}
-
-		candidateBytes, err := json.Marshal(candidate.ToJSON())
-		if err != nil {
-			slog.Error("Error marshalling candidate:", err)
-			return
-		}
-		err = CandidateCh.Send(candidateBytes)
-		if err != nil {
-			slog.Error("Error sending candidate:", err)
-		}
 	})
 
 	// 3. readOffer
 	//reader := io.NewSectionReader(os.Stdin, 0, 200)
 	fmt.Printf("Input Sender Offer:")
-	reader := io.LimitReader(os.Stdin, 2000)
+	reader := bufio.NewReader(os.Stdin)
 	var ResOffer string
 	_, err = fmt.Fscanf(reader, "%s", &ResOffer)
 
-	if err := ValidateSDP(string(ResOffer)); err != nil {
+	if err := ValidateSDP(ResOffer); err != nil {
 		log.Fatal("valid:", err)
 	}
-	RemoteSDP, err := DecodeSDP(string(ResOffer))
+	RemoteSDP, err := DecodeSDP(ResOffer)
 	if err != nil {
 		log.Fatal("decode:", err)
 	}
@@ -137,10 +93,7 @@ func main() {
 	if err != nil {
 		log.Fatal("setlocal:", err)
 	}
-	CandidateConn.L.Lock()
-	CandidateConn.Wait()
-	CandidateConn.L.Unlock()
-	//fmt.Println("LocalSDP:", connection.LocalDescription())
+	fmt.Println("LocalSDP:", connection.LocalDescription())
 	SendOffer, err := EncodeSDP(connection.LocalDescription())
 	if err != nil {
 		log.Fatal("encodeoffer:", err)
@@ -157,7 +110,6 @@ func main() {
 		//buf, err := io.ReadAll(reader)
 		//if err != nil {
 		//	log.Print(err)
-		return
 		//}
 		//err = dataChannel.Send(buf)
 		//if err != nil {
